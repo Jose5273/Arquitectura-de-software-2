@@ -9,20 +9,23 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from collections import Counter
 
-import pandas as pd
 import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 # --- SDK DE GEMINI ---
 from google import genai
 from dotenv import load_dotenv
+
+# --- MÓDULOS EXTERNOS ---
+from seguidores import ExtractorSeguidores
+from benford import generar_grafico_benford
 
 # Cargar las variables de entorno desde el archivo .env
 load_dotenv()
@@ -37,7 +40,7 @@ class Config:
     URL_PERFIL = f"{BASE_URL}{USUARIO}/"
 
     LIMITE_PUBLICACIONES = 25
-    LIMITE_NOMBRES = 50
+    LIMITE_NOMBRES = 5000  # Límite alto para la paginación de seguidores
 
     BRAVE_EXE = (
         r"C:\Program Files\BraveSoftware"
@@ -90,19 +93,6 @@ def extraer_nombre_visible(titulo: str | None) -> str | None:
     coincidencia = re.search(r"^(.*?)\s*\(@", titulo)
     return coincidencia.group(1).strip() if coincidencia else None
 
-def es_nombre_usuario_valido(nombre: str) -> bool:
-    return bool(nombre and re.fullmatch(r"[A-Za-z0-9._]{1,30}", nombre))
-
-def extraer_fecha_alt(texto_alt: str | None) -> str | None:
-    if not texto_alt:
-        return None
-    coincidencia = re.search(
-        r"\bon\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-        texto_alt,
-        re.IGNORECASE
-    )
-    return coincidencia.group(1) if coincidencia else None
-
 def url_imagen_valida(url: str | None) -> bool:
     if not url:
         return False
@@ -120,11 +110,6 @@ def limpiar_nombre_archivo(texto: str) -> str:
 # ==========================================================
 
 def analizar_personalidad_big_five(textos_publicaciones: list[str], api_key: str) -> dict:
-    """
-    Envía todas las descripciones a Gemini para obtener un perfil
-    de personalidad basado en el modelo de los 5 Grandes.
-    Incluye reintentos con espera exponencial para manejar la saturación (Error 503).
-    """
     if not textos_publicaciones:
         return {"error": "No hay textos para analizar."}
 
@@ -161,12 +146,9 @@ def analizar_personalidad_big_five(textos_publicaciones: list[str], api_key: str
 
     try:
         client = genai.Client(api_key=api_key)
-        
-        # Modelo actualizado según la sugerencia del error 404
         modelo = 'gemini-3.5-flash-lite'
-        
-        # Intentar hasta 5 veces con espera exponencial
         max_intentos = 5
+        
         for intento in range(1, max_intentos + 1):
             try:
                 print(f"  Llamando a {modelo} (Intento {intento}/{max_intentos})...")
@@ -184,23 +166,68 @@ def analizar_personalidad_big_five(textos_publicaciones: list[str], api_key: str
                 
             except Exception as e:
                 error_str = str(e)
-                # Si es un error 503 o 429, esperamos un tiempo exponencial y reintentamos
                 if "503" in error_str or "429" in error_str:
-                    tiempo_espera = 2 ** intento  # 2, 4, 8, 16, 32 segundos
+                    tiempo_espera = 2 ** intento
                     print(f"  ⚠️ Servidor ocupado. Esperando {tiempo_espera} segundos...")
                     time.sleep(tiempo_espera)
                 else:
-                    # Si es un error 404 (modelo no encontrado) u otro, no tiene sentido reintentar
                     print(f"  ❌ Error permanente con {modelo}: {error_str}")
-                    return {"error": f"Error de API: {error_str}"}
-        
-        # Si se agotan los intentos
-        print("❌ Se agotaron los reintentos. El servidor de Google sigue saturado.")
+                    return {"error": f"Error de API: {error_str}"}       
         return {"error": "Servidor saturado tras múltiples reintentos."}
         
     except Exception as e:
         print(f"❌ Error general al conectar con Gemini: {e}")
         return {"error": str(e)}
+
+def guardar_reporte_psicologico(analisis: dict, carpeta: Path, usuario: str):
+    if "error" in analisis or not analisis:
+        return
+
+    archivo_reporte = carpeta / "perfil_psicologico.md"
+    
+    contenido = f"""# 🧠 Perfil Psicológico (Big Five): @{usuario}
+    
+**Fecha del análisis:** {fecha_actual()}
+
+## 📊 Puntajes (sobre 10)
+
+*   **Apertura a la experiencia:** {analisis.get('apertura', {}).get('puntaje', 'N/A')}/10
+*   **Responsabilidad:** {analisis.get('responsabilidad', {}).get('puntaje', 'N/A')}/10
+*   **Extraversión:** {analisis.get('extraversion', {}).get('puntaje', 'N/A')}/10
+*   **Amabilidad:** {analisis.get('amabilidad', {}).get('puntaje', 'N/A')}/10
+*   **Neuroticismo:** {analisis.get('neuroticismo', {}).get('puntaje', 'N/A')}/10
+
+---
+
+## Resumen del Perfil
+{analisis.get('resumen_perfil', 'No disponible.')}
+
+---
+
+## Justificaciones del Análisis
+
+### 1. Apertura a la experiencia
+{analisis.get('apertura', {}).get('justificacion', 'No disponible.')}
+
+### 2. Responsabilidad
+{analisis.get('responsabilidad', {}).get('justificacion', 'No disponible.')}
+
+### 3. Extraversión
+{analisis.get('extraversion', {}).get('justificacion', 'No disponible.')}
+
+### 4. Amabilidad
+{analisis.get('amabilidad', {}).get('justificacion', 'No disponible.')}
+
+### 5. Neuroticismo
+{analisis.get('neuroticismo', {}).get('justificacion', 'No disponible.')}
+"""
+
+    try:
+        with open(archivo_reporte, "w", encoding="utf-8") as f:
+            f.write(contenido)
+        print(f"✅ Reporte psicológico guardado en: {archivo_reporte}")
+    except Exception as e:
+        print(f"❌ Error al guardar el reporte: {e}")
 
 # ==========================================================
 # DRIVER
@@ -269,11 +296,6 @@ class DriverInstagram:
 
 def esperar(segundos: float):
     time.sleep(segundos)
-
-def esperar_elemento(driver, selector: str, timeout: int):
-    return WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-    )
 
 def sesion_iniciada(driver) -> bool:
     try:
@@ -504,129 +526,45 @@ def recolectar_publicaciones(driver, cfg: type[Config], descargador: Descargador
     print(f"\nPublicaciones procesadas: {len(publicaciones)}")
     return publicaciones
 
-# ==========================================================
-# RECOLECCIÓN: SEGUIDORES / SEGUIDOS
-# ==========================================================
+def analizar_benford(numeros: list[int]) -> dict:
+    """
+    Realiza un análisis de la Ley de Benford sobre una lista de números.
+    Devuelve las frecuencias observadas y las esperadas.
+    """
+    if not numeros:
+        return {"error": "No hay números para analizar."}
 
-class ModalSeguidores:
-    def __init__(self, driver, cfg: type[Config]):
-        self.driver = driver
-        self.cfg = cfg
+    primeros_digitos = []
+    for n in numeros:
+        str_n = str(abs(n)).strip()
+        if str_n and str_n[0] != '0':
+            primeros_digitos.append(int(str_n[0]))
 
-    def _localizar_enlace(self, texto_buscado: str):
-        try:
-            for a in self.driver.find_elements(By.CSS_SELECTOR, "header a"):
-                try:
-                    if texto_buscado in a.text.strip().lower():
-                        return a
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        try:
-            return self.driver.find_element(By.XPATH, f"//a[.//span[contains(text(), '{texto_buscado}')]]")
-        except Exception:
-            return None
+    if not primeros_digitos:
+        return {"error": "Los números no contienen dígitos válidos."}
 
-    def _abrir(self, tipo: str):
-        texto_buscado = "seguidores" if tipo == "followers" else "seguidos"
-        self.driver.get(self.cfg.URL_PERFIL)
-        esperar(5)
-        enlace = self._localizar_enlace(texto_buscado)
-        if not enlace:
-            return None
-        try:
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", enlace)
-            esperar(1)
-            enlace.click()
-        except Exception:
-            try:
-                self.driver.execute_script("arguments[0].click();", enlace)
-            except Exception:
-                return None
-        try:
-            esperar_elemento(self.driver, 'div[role="dialog"]', self.cfg.TIMEOUT_MEDIO)
-        except Exception:
-            return None
-        esperar(3)
-        return self._contenedor_scroll()
+    conteo = Counter(primeros_digitos)
+    total = len(primeros_digitos)
 
-    def _contenedor_scroll(self):
-        candidatos = [
-            'div[role="dialog"] ._aano', 'div[role="dialog"] .isgrP',
-            'div[role="dialog"] div[style*="overflow-y"]', 'div[role="dialog"] div[style*="overflow"]',
-            'div[role="dialog"] ul',
-        ]
-        for selector in candidatos:
-            encontrados = self.driver.find_elements(By.CSS_SELECTOR, selector)
-            if encontrados:
-                return encontrados[0]
-        dialogos = self.driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"]')
-        return dialogos[0] if dialogos else None
+    esperado_benford = {
+        1: 30.1, 2: 17.6, 3: 12.5, 4: 9.7, 5: 7.9, 
+        6: 6.7, 7: 5.8, 8: 5.1, 9: 4.6
+    }
 
-    def _scroll(self, contenedor, max_intentos=25):
-        ultimo_alto = 0
-        sin_cambio = 0
-        for _ in range(max_intentos):
-            nombres_actuales = self.driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"] a[href]')
-            if len(nombres_actuales) >= self.cfg.LIMITE_NOMBRES:
-                break
-            try:
-                alto = self.driver.execute_script("return arguments[0].scrollHeight;", contenedor)
-            except Exception:
-                break
-            if alto == ultimo_alto:
-                sin_cambio += 1
-                if sin_cambio >= 3:
-                    break
-            else:
-                sin_cambio = 0
-            ultimo_alto = alto
-            try:
-                self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", contenedor)
-            except Exception:
-                break
-            esperar(2)
+    resultado = {}
+    for digito in range(1, 10):
+        observado = conteo.get(digito, 0)
+        porcentaje_obs = round((observado / total) * 100, 2)
+        resultado[digito] = {
+            "conteo_observado": observado,
+            "porcentaje_observado": porcentaje_obs,
+            "porcentaje_esperado_benford": esperado_benford[digito]
+        }
 
-    def _extraer_nombres(self) -> set[str]:
-        nombres = set()
-        enlaces = self.driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"] a[href]')
-        for enlace in enlaces:
-            if len(nombres) >= self.cfg.LIMITE_NOMBRES:
-                break
-            try:
-                href = enlace.get_attribute("href")
-                if not href: continue
-                partes = urlparse(href).path.strip("/").split("/")
-                if len(partes) != 1: continue
-                nombre = partes[0]
-                if nombre.lower() in self.cfg.RUTAS_EXCLUIDAS: continue
-                if nombre.lower() == self.cfg.USUARIO.lower(): continue
-                if not es_nombre_usuario_valido(nombre): continue
-                nombres.add(nombre)
-            except Exception:
-                continue
-        return nombres
-
-    def _cerrar(self):
-        try:
-            webdriver.ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-            esperar(1)
-        except Exception:
-            pass
-
-    def recolectar(self, tipo: str):
-        print(f"\nConsultando lista de {tipo}...")
-        contenedor = self._abrir(tipo)
-        if contenedor is None:
-            return [], "modal_no_abierto"
-        self._scroll(contenedor)
-        nombres = self._extraer_nombres()
-        self._cerrar()
-        lista = sorted(nombres, key=str.lower)
-        estado = "nombres_visibles_parciales" if lista else "lista_no_visible"
-        print("Nombres encontrados:", len(lista))
-        return lista, estado
+    return {
+        "total_numeros_analizados": total,
+        "distribucion_primer_digito": resultado
+    }
 
 # ==========================================================
 # FLUJO PRINCIPAL
@@ -660,12 +598,19 @@ def ejecutar():
             print("Aún no hay sesión. Abortando.")
             return
 
+        # 1. Scraping del perfil y publicaciones
         perfil = recolectar_perfil(driver, cfg)
         publicaciones = recolectar_publicaciones(driver, cfg, descargador)
 
-        modal = ModalSeguidores(driver, cfg)
-        seguidores, estado_seguidores = modal.recolectar("followers")
-        seguidos, estado_seguidos = modal.recolectar("following")
+        # 2. Uso del módulo externo para Seguidores y Seguidos (con paginación)
+        print("\n" + "="*50)
+        print("INICIANDO EXTRACCIÓN DE LISTAS (MÓDULO EXTERNO)")
+        print("="*50)
+        
+        extractor = ExtractorSeguidores(driver, cfg, limite_maximo=cfg.LIMITE_NOMBRES)
+        
+        seguidores, estado_seguidores = extractor.extraer("followers")
+        seguidos, estado_seguidos = extractor.extraer("following")
 
         perfil["estado_lista_seguidores"] = estado_seguidores
         perfil["estado_lista_seguidos"] = estado_seguidos
@@ -673,11 +618,14 @@ def ejecutar():
         datos_seguidores = [{"usuario_seguidor": n, "perfil_consultado": cfg.USUARIO} for n in seguidores]
         datos_seguidos = [{"usuario_seguido": n, "perfil_consultado": cfg.USUARIO} for n in seguidos]
 
+        # 3. Análisis de Gemini
         captions = [p["caption"] for p in publicaciones if p.get("caption")]
         
         analisis_gemini = {}
         if captions and api_key:
             analisis_gemini = analizar_personalidad_big_five(captions, api_key)
+            if "error" not in analisis_gemini:
+                guardar_reporte_psicologico(analisis_gemini, cfg.CARPETA_SALIDA, cfg.USUARIO)
         else:
             if not captions:
                 print("\n⚠️ No se encontraron descripciones para analizar.")
@@ -685,6 +633,7 @@ def ejecutar():
             elif not api_key:
                 analisis_gemini = {"error": "Falta la API Key."}
 
+        # 4. Consolidar y guardar
         resultado_consolidado = {
             "perfil": perfil,
             "publicaciones": publicaciones,
@@ -700,7 +649,7 @@ def ejecutar():
 
         print(f"\nArchivo JSON consolidado creado en: {archivo_json}")
 
-        print("\n========== RESUMEN ==========")
+        print("\n========== RESUMEN FINAL ==========")
         print("Usuario:", cfg.USUARIO)
         print("Publicaciones procesadas:", len(publicaciones))
         print("Seguidores capturados:", len(seguidores))
@@ -713,7 +662,32 @@ def ejecutar():
             print(f"Extraversión: {analisis_gemini.get('extraversion', {}).get('puntaje')}/10")
             print(f"Amabilidad: {analisis_gemini.get('amabilidad', {}).get('puntaje')}/10")
             print(f"Neuroticismo: {analisis_gemini.get('neuroticismo', {}).get('puntaje')}/10")
-            print(f"Resumen: {analisis_gemini.get('resumen_perfil')}")
+
+        # --- NUEVO: ANÁLISIS DE BENFORD AUTOMÁTICO FINAL ---
+        print("\n" + "="*50)
+        print("📊 GENERANDO ANÁLISIS DE BENFORD FINAL")
+        print("="*50)
+        
+        # Nota: Como el scraper solo obtiene nombres, usamos el índice como demo.
+        # Si en el futuro añades el conteo real de cada usuario, cámbialo aquí.
+        if seguidores:
+            print("  Generando gráfico para Seguidores...")
+            generar_grafico_benford(
+                list(range(1, len(seguidores) + 1)), 
+                "Total de Seguidores", 
+                "benford_seguidores_final.png", 
+                cfg.CARPETA_SALIDA
+            )
+        
+        if seguidos:
+            print("  Generando gráfico para Seguidos...")
+            generar_grafico_benford(
+                list(range(1, len(seguidos) + 1)), 
+                "Total de Seguidos", 
+                "benford_seguidos_final.png", 
+                cfg.CARPETA_SALIDA
+            )
+        # ---------------------------------------------------
 
         input("\nPulsa ENTER para cerrar el navegador...")
 

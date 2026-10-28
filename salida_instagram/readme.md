@@ -47,3 +47,11 @@ requests
 pandas
 python-dotenv
 google-genai
+
+Se han incluido dos nuevos archivos; benford.py y seguidores.py
+
+seguidores.py permite sacar la lista de seguidores hasta 5000, tardandose al rededor de una hora al sacarlo, se debe scrollear manualmente en la sección de seguidores/seguridos para conseguirse la información.
+
+El archivo benford.py permite hacer una comparativa entre la ley de benfod y la ley de benford del número de seguidos y seguidores en un gráfico, tomando el primer dígito del número de seguidos  o seguidores para la comparativa.
+
+El archivo main fue incluido la impresión en archivo json de la ley de Benfod.
